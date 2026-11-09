@@ -11,7 +11,7 @@ A user-space driver and macOS app for cheap EasyCAP USB video grabbers with the 
 
 macOS has no driver for these sticks. This one talks to the hardware directly over libusb: no kernel extension, no changes to system security, no root. It was written from the SAA7113 datasheet and the Linux `em28xx` and `saa7115` drivers.
 
-The picture is passed through as it comes from the tape. The decoder runs without sharpening or noise filters, both fields are kept (50 per second), and recordings are lossless. Made for digitizing VHS and for glitch art.
+The picture is passed through as it comes from the tape. The decoder runs without sharpening or noise filters, both fields are kept (50 per second), and recordings are lossless. Made for digitizing VHS among other things.
 
 <br/>
 
