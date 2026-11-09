@@ -1,7 +1,7 @@
-# /usr/bin/clang (Xcode, SDK 26.4) und das CLT-SDK 27.0 vertragen sich nicht,
+# /usr/bin/clang (Xcode) und das SDK der Command Line Tools vertragen sich nicht immer,
 # deshalb CLT-Compiler + CLT-SDK explizit.
 CC      = /Library/Developer/CommandLineTools/usr/bin/clang
-SDK     = /Library/Developer/CommandLineTools/SDKs/MacOSX27.0.sdk
+SDK     = /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
 CFLAGS  = -isysroot $(SDK) -Wall -O2 -Wno-deprecated-declarations
 IOKIT   = -framework IOKit -framework CoreFoundation
 LIBUSB  = -I/opt/homebrew/include/libusb-1.0 -L/opt/homebrew/lib -lusb-1.0
