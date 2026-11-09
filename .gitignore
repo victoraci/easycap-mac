@@ -1,0 +1,16 @@
+.DS_Store
+.claude
+# Binaries
+dump_desc
+chipid
+streamtest
+ezcap
+TAPR.app
+tapr/build
+# Aufnahmen und Testdaten
+aufnahmen/
+*.yuyv
+*.png
+status.log
+# Datenblatt (nicht frei verteilbar)
+*.pdf
