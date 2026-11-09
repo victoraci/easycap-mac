@@ -31,11 +31,11 @@ Measured on the stick: isochronous transfer at 20.8 MB/s with 50 fields per seco
 
 | | |
 |---|---|
-| `tapr/` | The macOS app (SwiftUI, Metal). Live picture, decoder controls, recording. |
+| `app/` | The macOS app, easycap (SwiftUI, Metal). Live picture, decoder controls, recording. |
 | `hw.c` | The driver: EM2860 registers, I2C to the decoder, decoder setup, isochronous transfers. |
 | `ezcap` | Command-line capture. Raw YUYV frames to stdout, decoder settings live from the keyboard. |
-| `vorschau.sh` | Live preview in ffplay, 50 fields per second or raw interlaced. |
-| `aufnahme.sh` | Lossless recording (FFV1 in MKV) with a live preview. |
+| `preview.sh` | Live preview in ffplay, 50 fields per second or raw interlaced. |
+| `record.sh` | Lossless recording (FFV1 in MKV) with a live preview. |
 | `streamtest` | Data rate, fields per second and transfer errors. |
 | `chipid`, `dump_desc` | Read-only checks of the chip ID and USB descriptors via IOKit. |
 
@@ -48,7 +48,7 @@ Measured on the stick: isochronous transfer at 20.8 MB/s with 50 fields per seco
 - 4:3 or 16:9 for anamorphic sources.
 - Record, watch the take in a loop, then save or discard. Saving writes a lossless `.mkv` (FFV1) and a deinterlaced `.mp4` (H.264, 50p) to watch anywhere.
 
-The interface is in German.
+The keys from `ezcap` work in the app too, plus `r` to switch the view.
 
 ## Build
 
@@ -59,7 +59,7 @@ brew install libusb ffmpeg
 git clone https://github.com/victoraci/easycap-mac.git
 cd easycap-mac
 make        # command-line tools
-make app    # TAPR.app
+make app    # easycap.app
 ```
 
 The app links libusb statically. ffmpeg is needed for recording.
@@ -67,15 +67,18 @@ The app links libusb statically. ffmpeg is needed for recording.
 ## Use
 
 ```bash
-./vorschau.sh           # live preview
-./aufnahme.sh           # record to aufnahmen/
-./aufnahme.sh -s        # S-Video instead of composite
+./preview.sh            # live preview
+./preview.sh raw        # both fields woven, 25 frames per second
+./record.sh             # record to recordings/
+./record.sh -s          # S-Video instead of composite
 ./ezcap -r 08=2c        # set a decoder register (hex) at start
 ```
 
-Press `h` in the terminal for the list of live controls. Unplugging the stick resets everything.
+Press `h` in the terminal for the list of live controls. Unplugging the stick resets everything. `record.sh` saves somewhere else with `OUT=/path ./record.sh`.
 
-Recordings from `aufnahme.sh` are bit-exact copies of what the stick sends, checked frame by frame with MD5. Expect roughly 25 to 40 GB per hour.
+Recordings from `record.sh` are bit-exact copies of what the stick sends, checked frame by frame with MD5. Expect roughly 25 to 40 GB per hour.
+
+Only one program can use the stick at a time: close the app before running the scripts, and the other way round.
 
 ## License
 

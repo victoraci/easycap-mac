@@ -1,7 +1,7 @@
-// chipid.c – liest beim eMPIA-Chip ein paar Register und scannt den I2C-Bus.
-// Nur LESE-Requests, genau wie der Linux-Treiber em28xx beim Einstecken.
+// chipid.c – reads a few registers from the eMPIA chip and scans the I2C bus.
+// READ requests only, just like the Linux em28xx driver does when the stick is plugged in.
 //
-// Bauen: make chipid
+// Build: make chipid
 
 #include <stdio.h>
 #include <CoreFoundation/CoreFoundation.h>
@@ -14,7 +14,7 @@
 
 static IOUSBDeviceInterface **dev;
 
-// Vendor-Request IN: em28xx nutzt bRequest 0 = Register lesen, 2 = I2C lesen.
+// Vendor request IN: em28xx uses bRequest 0 = read register, 2 = read I2C.
 static int vendor_in(uint8_t req, uint16_t index, uint8_t *buf, uint16_t len)
 {
     IOUSBDevRequest r = {
@@ -45,18 +45,18 @@ static const char *chip_name(int id)
     case 54: return "EM2765";
     case 65: return "EM2874";
     case 68: return "EM2884";
-    default: return "unbekannt";
+    default: return "unknown";
     }
 }
 
 static const char *i2c_name(int addr8)
 {
     switch (addr8) {
-    case 0x4a: return "SAA7113 / GM7113C (Videodecoder)";
-    case 0x48: return "SAA711x (alternative Adresse)";
-    case 0xb8: case 0xba: return "TVP5150 (Videodecoder)";
+    case 0x4a: return "SAA7113 / GM7113C (video decoder)";
+    case 0x48: return "SAA711x (alternative address)";
+    case 0xb8: case 0xba: return "TVP5150 (video decoder)";
     case 0xa0: return "EEPROM";
-    case 0x88: return "MSP34xx (Audio)";
+    case 0x88: return "MSP34xx (audio)";
     default: return "?";
     }
 }
@@ -68,41 +68,41 @@ int main(void)
     CFDictionarySetValue(match, CFSTR("idVendor"), CFNumberCreate(NULL, kCFNumberIntType, &vid));
     CFDictionarySetValue(match, CFSTR("idProduct"), CFNumberCreate(NULL, kCFNumberIntType, &pid));
     io_service_t svc = IOServiceGetMatchingService(kIOMainPortDefault, match);
-    if (!svc) { fprintf(stderr, "Geraet nicht gefunden\n"); return 1; }
+    if (!svc) { fprintf(stderr, "Device not found\n"); return 1; }
 
     IOCFPlugInInterface **plug = NULL;
     SInt32 score;
     if (IOCreatePlugInInterfaceForService(svc, kIOUSBDeviceUserClientTypeID,
                                           kIOCFPlugInInterfaceID, &plug, &score)) {
-        fprintf(stderr, "PlugIn fehlgeschlagen\n"); return 1;
+        fprintf(stderr, "Plug-in failed\n"); return 1;
     }
     (*plug)->QueryInterface(plug, CFUUIDGetUUIDBytes(kIOUSBDeviceInterfaceID), (LPVOID *)&dev);
     (*plug)->Release(plug);
     if (!dev) return 1;
 
     int id = reg_read(0x0a);
-    if (id < 0) { fprintf(stderr, "Register-Lesen fehlgeschlagen\n"); return 1; }
-    printf("Chip-ID (Reg 0x0a): %d -> %s\n", id, chip_name(id));
+    if (id < 0) { fprintf(stderr, "Register read failed\n"); return 1; }
+    printf("Chip ID (reg 0x0a): %d -> %s\n", id, chip_name(id));
 
     int cfg = reg_read(0x00);
     int i2c = reg_read(0x06);
     printf("Reg 0x00 CHIPCFG : 0x%02x\n", cfg);
-    printf("Reg 0x06 I2C_CLK : 0x%02x  (EEPROM auf Platine: %s)\n", i2c, (i2c & 0x08) ? "ja" : "nein");
+    printf("Reg 0x06 I2C_CLK : 0x%02x  (EEPROM on board: %s)\n", i2c, (i2c & 0x08) ? "yes" : "no");
     printf("Reg 0x08 GPIO    : 0x%02x\n", reg_read(0x08));
 
-    printf("\nI2C-Scan:\n");
+    printf("\nI2C scan:\n");
     int found = 0;
     for (int a7 = 1; a7 < 0x78; a7++) {
         uint8_t b;
         int a8 = a7 << 1;
         if (vendor_in(2, a8, &b, 1) < 0) continue;
-        int st = reg_read(0x05);   // I2C-Status: 0 = ACK, 0x10 = niemand da
+        int st = reg_read(0x05);   // I2C status: 0 = ACK, 0x10 = nobody there
         if (st == 0) {
             printf("  0x%02x  %s\n", a8, i2c_name(a8));
             found++;
         }
     }
-    if (!found) printf("  (nichts gefunden)\n");
+    if (!found) printf("  (nothing found)\n");
 
     (*dev)->Release(dev);
     IOObjectRelease(svc);

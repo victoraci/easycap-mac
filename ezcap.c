@@ -1,18 +1,18 @@
-// ezcap.c – Live-Video vom ezcap 116 als Rohdaten auf stdout, mit Glitch-Reglern.
+// ezcap.c – live video from the grabber as raw data on stdout, with glitch controls.
 //
-// Ausgabe: 720x576, YUYV (ffmpeg: yuyv422), 25 Vollbilder/s,
-//          Halbbilder zeilenweise verzahnt, oberes Halbbild zuerst.
-// Statuszeile jede Sekunde auf stderr. Tasten im Terminal verstellen den Decoder live
-// (Liste mit "h"). Alles ist fluechtig: Stick ab- und anstecken = Werkszustand.
+// Output: 720x576, YUYV (ffmpeg: yuyv422), 25 frames/s,
+//         fields interlaced line by line, top field first.
+// Status line every second on stderr. Keys in the terminal change the decoder live
+// (list with "h"). Nothing is permanent: unplugging and replugging the stick = factory state.
 //
-// Beispiel: ./ezcap | ffplay -f rawvideo -pixel_format yuyv422 -video_size 720x576 -framerate 25 -i -
-// (fertig verpackt in vorschau.sh)
+// Example: ./ezcap | ffplay -f rawvideo -pixel_format yuyv422 -video_size 720x576 -framerate 25 -i -
+// (ready-made in preview.sh)
 //
-// Bauen: make ezcap
-// Start: ./ezcap [-a alt] [-t sekunden] [-s] [-q] [-r reg=wert ...] [-R datei]
-//   -s  S-Video statt Composite     -q  keine Statuszeile
-//   -r  Decoder-Register direkt setzen (hex), z. B. -r 08=2c
-//   -R  REC-Anzeige mit Laufzeit und Groesse dieser Datei (fuer aufnahme.sh)
+// Build: make ezcap
+// Run:   ./ezcap [-a alt] [-t seconds] [-s] [-q] [-r reg=value ...] [-R file]
+//   -s  S-Video instead of composite     -q  no status line
+//   -r  set a decoder register directly (hex), e.g. -r 08=2c
+//   -R  REC display with running time and size of this file (for record.sh)
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,19 +27,19 @@
 #include "hw.h"
 
 #define FRAME_BYTES (EZ_LINE_BYTES * EZ_HEIGHT)
-#define SLOTS 4                     // Puffer zwischen USB und Ausgabe (= 160 ms)
+#define SLOTS 4                     // buffer between USB and output (= 160 ms)
 
 static volatile int running = 1;
 
-// ------------------------------------------------------------ Bild bauen --
+// --------------------------------------------------------- Building frames --
 
-// Halbbilder werden direkt in dieses Bild geschrieben. Fehlt mal eines, bleiben
-// einfach die alten Zeilen stehen – wie Nachleuchten auf der Roehre.
+// Fields are written straight into this frame. If one goes missing, the old
+// lines simply stay – like afterglow on a CRT.
 static uint8_t work[FRAME_BYTES];
-static long pos;                    // Bytes im aktuellen Halbbild
+static long pos;                    // bytes in the current field
 static int in_field, cur_top, field_closed, swap_fields;
 
-// Ringpuffer USB -> Schreib-Thread
+// Ring buffer USB -> writer thread
 static uint8_t slot[SLOTS][FRAME_BYTES];
 static int head, tail, count;
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
@@ -60,10 +60,10 @@ static void field_end(void)
 {
     if (!in_field || field_closed) return;
     field_closed = 1;
-    if (cur_top) return;            // Vollbild ist erst nach dem unteren Halbbild fertig
+    if (cur_top) return;            // a frame is only complete after the bottom field
 
-    // Drossel: nie mehr als 25 Bilder/s raus. Im erzwungenen 60-Hz-Modus kommen ~30,
-    // die wuerden sich sonst in ffplay stauen und die Vorschau immer spaeter machen.
+    // Cap: never more than 25 frames/s out. In forced 60 Hz mode about 30 arrive,
+    // they would otherwise pile up in ffplay and make the preview lag more and more.
     if (frames_passed >= (now() - t_start) * 25 + 2) {
         frames_capped++;
         return;
@@ -77,7 +77,7 @@ static void field_end(void)
         count++;
         pthread_cond_signal(&wake);
     } else {
-        frames_dropped++;           // Abnehmer (ffplay/ffmpeg) kommt nicht hinterher
+        frames_dropped++;           // the consumer (ffplay/ffmpeg) can't keep up
     }
     pthread_mutex_unlock(&lock);
 }
@@ -94,8 +94,8 @@ static void put_video(const uint8_t *p, int len)
     }
 }
 
-// Kopf: 22 5a xx 88 = neues Halbbild (Bit 0 von xx: 0 = oben), 88 88 88 88 = weiter,
-// Ende-Marker c6 93 93 93. Siehe streamtest.c.
+// Header: 22 5a xx 88 = new field (bit 0 of xx: 0 = top), 88 88 88 88 = continuation,
+// end marker c6 93 93 93. See streamtest.c.
 static void on_packet(const uint8_t *p, int len)
 {
     if (len >= 4 && p[0] == 0x22 && p[1] == 0x5a) {
@@ -116,7 +116,7 @@ static void on_packet(const uint8_t *p, int len)
     if (pos >= EZ_FIELD_BYTES) field_end();
 }
 
-// ------------------------------------------------------------- Ausgabe --
+// ------------------------------------------------------------------ Output --
 
 static int write_all(const uint8_t *p, size_t n)
 {
@@ -124,14 +124,14 @@ static int write_all(const uint8_t *p, size_t n)
         ssize_t w = write(1, p, n);
         if (w < 0) {
             if (errno == EINTR) continue;
-            return 0;               // z. B. ffplay-Fenster geschlossen (EPIPE)
+            return 0;               // e.g. ffplay window closed (EPIPE)
         }
         p += w; n -= w;
     }
     return 1;
 }
 
-// Eigener Thread, damit ein langsamer Abnehmer nie den USB-Empfang blockiert.
+// Its own thread, so a slow consumer never blocks USB reception.
 static void *writer(void *arg)
 {
     (void)arg;
@@ -154,28 +154,28 @@ static void *writer(void *arg)
     return NULL;
 }
 
-// --------------------------------------------------------- Glitch-Regler --
+// --------------------------------------------------------- Glitch controls --
 //
-// Alle Bits aus dem SAA7113H-Datenblatt (Rev. 02, 2005), Abschnitt 9.2:
-//   0x08 Sync (Tab. 36): D7 AUFD 50/60-Auto, D6 FSEL 0=50/1=60 Hz,
-//        D4-D3 HTC Zeilen-PLL 00 TV / 01 VTR / 11 schnell, D2 HPLL 1 = PLL offen,
-//        D1-D0 VNOI vertikal 00 normal / 01 schnell / 10 freilaufend / 11 aus
-//   0x03 (Tab. 31) D3 HOLDG: Helligkeits-AGC einfrieren
-//   0x09 (Tab. 37) D7 BYPS:  Farbtraeger-Falle aus
-//   0x0B (Tab. 39) Kontrast, vorzeichenbehaftet: negativ = invertierte Helligkeit
-//   0x0C (Tab. 40) Saettigung, vorzeichenbehaftet: negativ = invertierte Farben
-//   0x0D (Tab. 41) Farbton, -180 bis +178.6 Grad (1.4 Grad pro Schritt)
-//   0x0E (Tab. 42) D1-D0 CHBW: Farb-Bandbreite 620 / 800 / 920 / 1000 kHz
-//   0x0F (Tab. 44) D7 ACGC:  1 = Farb-AGC aus, feste Verstaerkung
-//   0x11 (Tab. 49) D0 COLO:  Farbe erzwingen (kein Farb-Killer)
+// All bits from the SAA7113H datasheet (Rev. 02, 2005), section 9.2:
+//   0x08 sync (table 36): D7 AUFD 50/60 auto, D6 FSEL 0=50/1=60 Hz,
+//        D4-D3 HTC line PLL 00 TV / 01 VTR / 11 fast, D2 HPLL 1 = PLL open,
+//        D1-D0 VNOI vertical 00 normal / 01 fast / 10 free-running / 11 off
+//   0x03 (table 31) D3 HOLDG: freeze the luma AGC
+//   0x09 (table 37) D7 BYPS:  chroma trap off
+//   0x0B (table 39) contrast, signed: negative = inverted brightness
+//   0x0C (table 40) saturation, signed: negative = inverted colors
+//   0x0D (table 41) hue, -180 to +178.6 degrees (1.4 degrees per step)
+//   0x0E (table 42) D1-D0 CHBW: chroma bandwidth 620 / 800 / 920 / 1000 kHz
+//   0x0F (table 44) D7 ACGC:  1 = chroma AGC off, fixed gain
+//   0x11 (table 49) D0 COLO:  force color (no color killer)
 
 enum { R03, R08, R09, R0B, R0C, R0D, R0E, R0F, R11, NREG };
 static const uint8_t reg_addr[NREG] = { 0x03, 0x08, 0x09, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x11 };
-static uint8_t reg[NREG], reg0[NREG];  // aktuell / Startwert fuer "0"
+static uint8_t reg[NREG], reg0[NREG];  // current / start value for "0"
 
-static const char *htc_name[] = { "TV", "VTR", "?", "schnell" };
-static const char *vnoi_name[] = { "normal", "schnell", "frei", "aus" };
-static const char *chbw_name[] = { "schmal", "normal", "mittel", "breit" };
+static const char *htc_name[] = { "TV", "VTR", "?", "fast" };
+static const char *vnoi_name[] = { "normal", "fast", "free", "off" };
+static const char *chbw_name[] = { "narrow", "normal", "medium", "wide" };
 
 static void regs_load(void)
 {
@@ -194,7 +194,7 @@ static uint8_t negate(uint8_t v) { return (uint8_t)-(int8_t)v; }
 static void handle_key(char c)
 {
     switch (c) {
-    case 's': {                                         // TV -> VTR -> schnell -> TV
+    case 's': {                                         // TV -> VTR -> fast -> TV
         int htc = (reg[R08] >> 3) & 3;
         htc = htc == 0 ? 1 : htc == 1 ? 3 : 0;
         set(R08, (reg[R08] & ~0x18) | (htc << 3));
@@ -202,13 +202,13 @@ static void handle_key(char c)
     }
     case 'p': set(R08, reg[R08] ^ 0x04); break;
     case 'v': set(R08, (reg[R08] & ~0x03) | ((reg[R08] + 1) & 0x03)); break;
-    case 'n': set(R08, (reg[R08] & ~0x80) ^ 0x40); break;   // Auto aus, 50/60 umschalten
+    case 'n': set(R08, (reg[R08] & ~0x80) ^ 0x40); break;   // auto off, toggle 50/60
     case 'a': set(R03, reg[R03] ^ 0x08); break;
     case 'g': set(R0F, reg[R0F] ^ 0x80); break;
     case 'c': set(R11, reg[R11] ^ 0x01); break;
     case 't': set(R09, reg[R09] ^ 0x80); break;
     case 'b': set(R0E, (reg[R0E] & ~0x03) | ((reg[R0E] + 1) & 0x03)); break;
-    case 'u': set(R0D, reg[R0D] + 32); break;              // +45 Grad
+    case 'u': set(R0D, reg[R0D] + 32); break;              // +45 degrees
     case 'i': set(R0B, negate(reg[R0B])); break;
     case 'k': set(R0C, negate(reg[R0C])); break;
     case 'f': swap_fields ^= 1; break;
@@ -223,17 +223,17 @@ static void handle_key(char c)
 static void print_help(void)
 {
     fprintf(stderr,
-        "\nTasten (hier im Terminal):\n"
-        "  Sync   s Zeilen-PLL TV/VTR/schnell   p PLL offen (Bild reisst)\n"
-        "         v vertikal normal/schnell/frei/aus   n 50/60 Hz erzwingen (rollt)\n"
-        "  Pegel  a Helligkeits-Automatik fest   g Farb-Automatik fest\n"
-        "  Farbe  c Farbe erzwingen   t Farbtraeger-Falle aus   b Farb-Bandbreite\n"
-        "         u Farbton +45 Grad   k Farben invertieren\n"
-        "  Bild   i Negativ   f Halbbilder tauschen\n"
-        "         0 alles zurueck   h Hilfe   Ctrl+C Ende\n\n");
+        "\nKeys (here in the terminal):\n"
+        "  Sync   s line PLL TV/VTR/fast   p PLL open (picture tears)\n"
+        "         v vertical normal/fast/free/off   n force 50/60 Hz (rolls)\n"
+        "  Level  a freeze brightness AGC   g freeze color AGC\n"
+        "  Color  c force color   t chroma trap off   b chroma bandwidth\n"
+        "         u hue +45 degrees   k invert colors\n"
+        "  Image  i negative   f swap fields\n"
+        "         0 reset all   h help   Ctrl+C quit\n\n");
 }
 
-// Eine Zeile, nur was von der Grundeinstellung abweicht. Kuerzel = Tasten.
+// One line, only what differs from the defaults. Abbreviations = keys.
 static void print_status(long fps, int locked)
 {
     char s[256];
@@ -241,19 +241,19 @@ static void print_status(long fps, int locked)
 #define ADD(...) n += snprintf(s + n, sizeof s - n, __VA_ARGS__)
     uint8_t d08 = reg[R08] ^ reg0[R08];
     if (d08 & 0x18) ADD(" s:%s", htc_name[(reg[R08] >> 3) & 3]);
-    if (d08 & 0x04) ADD(" p:%s", (reg[R08] & 0x04) ? "offen" : "zu");
+    if (d08 & 0x04) ADD(" p:%s", (reg[R08] & 0x04) ? "open" : "closed");
     if (d08 & 0x03) ADD(" v:%s", vnoi_name[reg[R08] & 3]);
     if (d08 & 0xc0) ADD(" n:%s", (reg[R08] & 0x80) ? "auto" : (reg[R08] & 0x40) ? "60" : "50");
-    if ((reg[R03] ^ reg0[R03]) & 0x08) ADD(" a:%s", (reg[R03] & 0x08) ? "fest" : "an");
-    if ((reg[R0F] ^ reg0[R0F]) & 0x80) ADD(" g:%s", (reg[R0F] & 0x80) ? "fest" : "an");
-    if ((reg[R11] ^ reg0[R11]) & 0x01) ADD(" c:%s", (reg[R11] & 0x01) ? "immer" : "auto");
-    if ((reg[R09] ^ reg0[R09]) & 0x80) ADD(" t:%s", (reg[R09] & 0x80) ? "aus" : "an");
+    if ((reg[R03] ^ reg0[R03]) & 0x08) ADD(" a:%s", (reg[R03] & 0x08) ? "frozen" : "on");
+    if ((reg[R0F] ^ reg0[R0F]) & 0x80) ADD(" g:%s", (reg[R0F] & 0x80) ? "frozen" : "on");
+    if ((reg[R11] ^ reg0[R11]) & 0x01) ADD(" c:%s", (reg[R11] & 0x01) ? "always" : "auto");
+    if ((reg[R09] ^ reg0[R09]) & 0x80) ADD(" t:%s", (reg[R09] & 0x80) ? "off" : "on");
     if ((reg[R0E] ^ reg0[R0E]) & 0x03) ADD(" b:%s", chbw_name[reg[R0E] & 3]);
-    if (reg[R0D] != reg0[R0D]) ADD(" u:%+.0f Grad", (int8_t)reg[R0D] * 180.0 / 128);
-    if (reg[R0C] != reg0[R0C]) ADD(" k:invertiert");
-    if (reg[R0B] != reg0[R0B]) ADD(" i:negativ");
-    if (swap_fields) ADD(" f:getauscht");
-    if (frames_dropped) ADD(" | verworfen %ld", frames_dropped);
+    if (reg[R0D] != reg0[R0D]) ADD(" u:%+.0f deg", (int8_t)reg[R0D] * 180.0 / 128);
+    if (reg[R0C] != reg0[R0C]) ADD(" k:inverted");
+    if (reg[R0B] != reg0[R0B]) ADD(" i:negative");
+    if (swap_fields) ADD(" f:swapped");
+    if (frames_dropped) ADD(" | dropped %ld", frames_dropped);
 #undef ADD
     fprintf(stderr, "\r\033[K");
     if (rec_path) {
@@ -262,11 +262,11 @@ static void print_status(long fps, int locked)
         double gb = stat(rec_path, &sb) == 0 ? sb.st_size / 1e9 : 0;
         fprintf(stderr, "REC %ld:%02ld:%02ld %.2f GB | ", t / 3600, t / 60 % 60, t % 60, gb);
     }
-    fprintf(stderr, "%2ld fps %-11s |%s", fps, locked ? "Signal" : "kein Signal",
-            n ? s : " Grundeinstellung");
+    fprintf(stderr, "%2ld fps %-9s |%s", fps, locked ? "signal" : "no signal",
+            n ? s : " defaults");
 }
 
-// ------------------------------------------------------------- Terminal --
+// ---------------------------------------------------------------- Terminal --
 
 static struct termios tio_orig;
 static int tio_set;
@@ -276,7 +276,7 @@ static void term_restore(void)
     if (tio_set) tcsetattr(0, TCSANOW, &tio_orig);
 }
 
-// Tasten sofort lesen (ohne Enter), ohne Echo. Ctrl+C funktioniert weiter.
+// Read keys immediately (no Enter), without echo. Ctrl+C keeps working.
 static void term_raw(void)
 {
     if (!isatty(0)) return;
@@ -292,7 +292,7 @@ static void term_raw(void)
 
 static void on_signal(int s) { (void)s; running = 0; }
 
-// ----------------------------------------------------------------- main --
+// -------------------------------------------------------------------- main --
 
 int main(int argc, char **argv)
 {
@@ -307,12 +307,12 @@ int main(int argc, char **argv)
         else if (opt == 'r' && npoke < 32 &&
                  sscanf(optarg, "%x=%x", &poke_reg[npoke], &poke_val[npoke]) == 2) npoke++;
         else {
-            fprintf(stderr, "Aufruf: %s [-a alt] [-t sekunden] [-s] [-q] [-r reg=wert] [-R datei]\n", argv[0]);
+            fprintf(stderr, "Usage: %s [-a alt] [-t seconds] [-s] [-q] [-r reg=value] [-R file]\n", argv[0]);
             return 1;
         }
     }
     if (isatty(1)) {
-        fprintf(stderr, "stdout ist ein Terminal. Bitte an ffplay/ffmpeg weiterleiten, z. B. ./vorschau.sh\n");
+        fprintf(stderr, "stdout is a terminal. Pipe it into ffplay/ffmpeg, e.g. ./preview.sh\n");
         return 1;
     }
 
@@ -323,7 +323,7 @@ int main(int argc, char **argv)
     if (ez_open(svideo) < 0) return 1;
     for (int i = 0; i < npoke; i++) {
         ez_saa_write(poke_reg[i], poke_val[i]);
-        fprintf(stderr, "Decoder-Register 0x%02x = 0x%02x\n", poke_reg[i], poke_val[i]);
+        fprintf(stderr, "Decoder register 0x%02x = 0x%02x\n", poke_reg[i], poke_val[i]);
     }
     regs_load();
 
@@ -365,7 +365,7 @@ int main(int argc, char **argv)
     ez_close();
     term_restore();
 
-    fprintf(stderr, "\nEnde: %ld Bilder ausgegeben, %ld verworfen, %ld gedrosselt, %ld USB-Fehler\n",
+    fprintf(stderr, "\nDone: %ld frames out, %ld dropped, %ld capped, %ld USB errors\n",
             frames_out, frames_dropped, frames_capped, ez_stats.errors);
     return 0;
 }

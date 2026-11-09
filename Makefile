@@ -1,5 +1,5 @@
-# /usr/bin/clang (Xcode) und das SDK der Command Line Tools vertragen sich nicht immer,
-# deshalb CLT-Compiler + CLT-SDK explizit.
+# /usr/bin/clang (Xcode) and the Command Line Tools SDK don't always get along,
+# so the CLT compiler + CLT SDK are set explicitly.
 CC      = /Library/Developer/CommandLineTools/usr/bin/clang
 SDK     = /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
 CFLAGS  = -isysroot $(SDK) -Wall -O2 -Wno-deprecated-declarations
@@ -23,26 +23,26 @@ streamtest: streamtest.c hw.c hw.h
 ezcap: ezcap.c hw.c hw.h
 	$(CC) $(CFLAGS) ezcap.c hw.c $(LIBUSB) -o $@
 
-# TAPR.app: Mac-Fenster mit Live-Bild, Doppelklick startet. hw.c laeuft direkt in der App.
-# libusb ist fest eingebaut (.a), damit ein brew-Update die App nicht kaputt macht.
-# Nicht in "all", damit "make" fuer die Terminal-Tools genauso schnell bleibt wie bisher.
-APP_SWIFT = tapr/TAPRApp.swift tapr/Stick.swift tapr/Regler.swift tapr/Bild.swift tapr/Aufnahme.swift
+# easycap.app: Mac window with the live picture, starts with a double-click. hw.c runs inside the app.
+# libusb is built in (.a), so a brew update can't break the app.
+# Not part of "all", so "make" stays as fast as before for the terminal tools.
+APP_SWIFT = app/EasycapApp.swift app/Stick.swift app/Controls.swift app/LiveView.swift app/Recorder.swift
 
-app: TAPR.app
+app: easycap.app
 
-TAPR.app: $(APP_SWIFT) tapr/kern.c tapr/kern.h hw.c hw.h tapr/Info.plist tapr/Inter.woff2
-	rm -rf $@ tapr/build
-	mkdir -p tapr/build $@/Contents/MacOS $@/Contents/Resources
-	$(CC) $(CFLAGS) -I/opt/homebrew/include/libusb-1.0 -c hw.c -o tapr/build/hw.o
-	$(CC) $(CFLAGS) -I/opt/homebrew/include/libusb-1.0 -c tapr/kern.c -o tapr/build/kern.o
-	$(SWIFTC) -sdk $(SDK) -O -swift-version 5 -import-objc-header tapr/kern.h $(APP_SWIFT) \
-		tapr/build/hw.o tapr/build/kern.o /opt/homebrew/lib/libusb-1.0.a \
+easycap.app: $(APP_SWIFT) app/core.c app/core.h hw.c hw.h app/Info.plist app/Inter.woff2
+	rm -rf $@ app/build
+	mkdir -p app/build $@/Contents/MacOS $@/Contents/Resources
+	$(CC) $(CFLAGS) -I/opt/homebrew/include/libusb-1.0 -c hw.c -o app/build/hw.o
+	$(CC) $(CFLAGS) -I/opt/homebrew/include/libusb-1.0 -c app/core.c -o app/build/core.o
+	$(SWIFTC) -sdk $(SDK) -O -swift-version 5 -import-objc-header app/core.h $(APP_SWIFT) \
+		app/build/hw.o app/build/core.o /opt/homebrew/lib/libusb-1.0.a \
 		-framework IOKit -framework CoreFoundation -framework Security \
-		-o $@/Contents/MacOS/TAPR
-	cp tapr/Info.plist $@/Contents/
-	cp tapr/Inter.woff2 $@/Contents/Resources/
+		-o $@/Contents/MacOS/easycap
+	cp app/Info.plist $@/Contents/
+	cp app/Inter.woff2 $@/Contents/Resources/
 	codesign --force -s - $@
 
 clean:
 	rm -f dump_desc chipid streamtest ezcap
-	rm -rf TAPR.app tapr/build
+	rm -rf easycap.app app/build

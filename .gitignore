@@ -5,12 +5,12 @@ dump_desc
 chipid
 streamtest
 ezcap
-TAPR.app
-tapr/build
-# Aufnahmen und Testdaten
-aufnahmen/
+easycap.app
+app/build
+# Recordings and test data
+recordings/
 *.yuyv
 *.png
 status.log
-# Datenblatt (nicht frei verteilbar)
+# Datasheet (not freely redistributable)
 *.pdf

@@ -1,6 +1,6 @@
-// kern.c – Empfang fuer die TAPR-App: Stick suchen, Halbbilder sammeln, an Swift weiterreichen.
-// Paket-Logik wie in ezcap.c, nur geht hier jedes Halbbild einzeln raus (50/s)
-// statt fertig verzahnter Vollbilder. ezcap.c selbst bleibt unangetastet.
+// core.c – reception for the easycap app: find the stick, collect fields, hand them to Swift.
+// Packet logic as in ezcap.c, except that every field goes out on its own here (50/s)
+// instead of finished interlaced frames. ezcap.c itself stays untouched.
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,11 +11,11 @@
 #include <pthread.h>
 #include <time.h>
 #include "../hw.h"
-#include "kern.h"
+#include "core.h"
 
-_Static_assert(TAPR_FIELD_BYTES == EZ_FIELD_BYTES, "Halbbild-Groesse passt nicht zu hw.h");
+_Static_assert(CORE_FIELD_BYTES == EZ_FIELD_BYTES, "field size doesn't match hw.h");
 
-static volatile int running, state = TAPR_SUCHT;
+static volatile int running, state = CORE_SEARCHING;
 static pthread_t thread;
 
 static double now(void)
@@ -25,16 +25,16 @@ static double now(void)
     return ts.tv_sec + ts.tv_nsec / 1e9;
 }
 
-// --------------------------------------------------------------- Messwerte --
+// ---------------------------------------------------------------- Readings --
 
-// Nur der USB-Thread schreibt, die Oberflaeche liest zweimal pro Sekunde.
+// Only the USB thread writes, the interface reads twice a second.
 static volatile int signal_ok, rate;
-static long fields_total;                       // fertige Halbbilder seit dem Verbinden
-static double field_at;                         // wann das letzte fertig war
+static long fields_total;                       // finished fields since connecting
+static double field_at;                         // when the last one finished
 static double rate_t, rate_field_at;
 static long rate_n;
 
-static void messen_start(void)
+static void stats_reset(void)
 {
     memset(&ez_stats, 0, sizeof ez_stats);
     fields_total = 0;
@@ -45,40 +45,40 @@ static void messen_start(void)
     rate_field_at = 0;
 }
 
-// Einmal pro Sekunde Halbbilder/s ausrechnen. Gemessen von Halbbild zu Halbbild statt
-// einfach pro Sekunde gezaehlt, sonst springt die Anzeige zwischen 49, 50 und 51.
-static void messen(void)
+// Work out fields/s once a second. Measured from field to field instead of simply
+// counted per second, otherwise the display jumps between 49, 50 and 51.
+static void stats_update(void)
 {
     double t = now();
     if (t - rate_t < 1) return;
     long n = fields_total - rate_n;
     if (n <= 0) rate = 0;
     else if (rate_field_at > 0) rate = (int)(n / (field_at - rate_field_at) + 0.5);
-    else rate = (int)(n / (t - rate_t) + 0.5);      // erste Messung nach dem Verbinden
+    else rate = (int)(n / (t - rate_t) + 0.5);      // first reading after connecting
     rate_t = t;
     rate_n = fields_total;
     rate_field_at = field_at;
 }
 
-int  tapr_signal(void) { return signal_ok; }
-int  tapr_rate(void) { return rate; }
-long tapr_usb_errors(void) { return ez_stats.errors; }
+int  core_signal(void) { return signal_ok; }
+int  core_rate(void) { return rate; }
+long core_usb_errors(void) { return ez_stats.errors; }
 
-// ----------------------------------------------------------- Glitch-Regler --
+// --------------------------------------------------------- Glitch controls --
 
-// Dieselben Decoder-Register wie in ezcap.c, Bits siehe dort (gegen Datenblatt geprueft).
-// Die Oberflaeche sagt nur, welchen Wert sie will. Geschrieben wird im USB-Thread, und zwar
-// immer nur der neueste Wunsch: Beim Ziehen am Schieber fallen Zwischenwerte einfach weg.
-static const uint8_t reg_addr[TAPR_NREG] = { 0x03, 0x08, 0x09, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x11 };
-static volatile uint8_t reg_want[TAPR_NREG], reg_hw[TAPR_NREG], reg_start[TAPR_NREG];
+// The same decoder registers as in ezcap.c, bits see there (checked against the datasheet).
+// The interface only says which value it wants. Writing happens on the USB thread, and always
+// only the newest wish: while dragging a slider, the values in between simply drop out.
+static const uint8_t reg_addr[CORE_NREG] = { 0x03, 0x08, 0x09, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x11 };
+static volatile uint8_t reg_want[CORE_NREG], reg_hw[CORE_NREG], reg_start[CORE_NREG];
 static volatile int regs_ok;
 
-// Stand nach der Grundeinstellung in hw.c (SAA7113, PAL, Composite). Fuers Testbild.
-static const uint8_t reg_default[TAPR_NREG] = { 0x30, 0x28, 0x01, 0x47, 0x40, 0x00, 0x07, 0x2a, 0x0c };
+// State after the decoder setup in hw.c (SAA7113, PAL, composite). For the test frame.
+static const uint8_t reg_default[CORE_NREG] = { 0x30, 0x28, 0x01, 0x47, 0x40, 0x00, 0x07, 0x2a, 0x0c };
 
 static void regs_load(int from_chip)
 {
-    for (int i = 0; i < TAPR_NREG; i++) {
+    for (int i = 0; i < CORE_NREG; i++) {
         int v = from_chip ? ez_saa_read(reg_addr[i]) : -1;
         reg_want[i] = reg_hw[i] = reg_start[i] = v < 0 ? reg_default[i] : v;
     }
@@ -87,7 +87,7 @@ static void regs_load(int from_chip)
 
 static void regs_write(void)
 {
-    for (int i = 0; i < TAPR_NREG; i++) {
+    for (int i = 0; i < CORE_NREG; i++) {
         uint8_t v = reg_want[i];
         if (v == reg_hw[i]) continue;
         ez_saa_write(reg_addr[i], v);
@@ -95,20 +95,20 @@ static void regs_write(void)
     }
 }
 
-int tapr_reg(int i) { return regs_ok && i >= 0 && i < TAPR_NREG ? reg_want[i] : -1; }
-int tapr_reg_start(int i) { return regs_ok && i >= 0 && i < TAPR_NREG ? reg_start[i] : -1; }
+int core_reg(int i) { return regs_ok && i >= 0 && i < CORE_NREG ? reg_want[i] : -1; }
+int core_reg_start(int i) { return regs_ok && i >= 0 && i < CORE_NREG ? reg_start[i] : -1; }
 
-void tapr_reg_set(int i, int value)
+void core_reg_set(int i, int value)
 {
-    if (i >= 0 && i < TAPR_NREG) reg_want[i] = (uint8_t)value;
+    if (i >= 0 && i < CORE_NREG) reg_want[i] = (uint8_t)value;
 }
 
-// --------------------------------------------------------------- Aufnahme --
+// --------------------------------------------------------------- Recording --
 
-// Wie ezcap.c: Beide Halbbilder ergeben ein Vollbild, fertig nach dem unteren. Fehlt mal
-// etwas, bleiben die alten Zeilen stehen. Gedrosselt auf 25/s (im 60-Hz-Modus kommen ~30).
-#define REC_BYTES (TAPR_LINE_BYTES * TAPR_HEIGHT)
-#define REC_SLOTS 50                            // Puffer USB -> Schreib-Thread (= 2 s)
+// Like ezcap.c: both fields make a frame, finished after the bottom one. If something is
+// missing, the old lines stay. Capped at 25/s (in 60 Hz mode about 30 come in).
+#define REC_BYTES (CORE_LINE_BYTES * CORE_HEIGHT)
+#define REC_SLOTS 50                            // buffer USB -> writer thread (= 2 s)
 
 static uint8_t rec_work[REC_BYTES];
 static uint8_t rec_ring[REC_SLOTS][REC_BYTES];
@@ -122,17 +122,17 @@ static pthread_t rec_thread;
 static pthread_mutex_t rec_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t rec_wake = PTHREAD_COND_INITIALIZER;
 
-// Laeuft im USB-Thread (bzw. Testbild-Thread) und blockiert nie auf ffmpeg.
+// Runs on the USB thread (or the test frame thread) and never blocks on ffmpeg.
 static void rec_feed(const uint8_t *f, int top)
 {
     if (!rec_on) return;
-    if (!rec_begun) {                           // mit einem oberen Halbbild anfangen, sonst ist Bild 1 halb leer
+    if (!rec_begun) {                           // start with a top field, otherwise frame 1 is half empty
         if (!top) return;
         rec_begun = 1;
     }
     int row_offset = (top != rec_swap) ? 0 : 1;
-    for (int line = 0; line < TAPR_FIELD_LINES; line++)
-        memcpy(rec_work + (line * 2 + row_offset) * TAPR_LINE_BYTES, f + line * TAPR_LINE_BYTES, TAPR_LINE_BYTES);
+    for (int line = 0; line < CORE_FIELD_LINES; line++)
+        memcpy(rec_work + (line * 2 + row_offset) * CORE_LINE_BYTES, f + line * CORE_LINE_BYTES, CORE_LINE_BYTES);
     if (top) return;
 
     if (rec_passed >= (now() - rec_t0) * 25 + 2) return;
@@ -156,7 +156,7 @@ static int rec_write_all(const uint8_t *p, size_t n)
         ssize_t w = write(rec_fd, p, n);
         if (w < 0) {
             if (errno == EINTR) continue;
-            return 0;                           // ffmpeg ist weg (EPIPE)
+            return 0;                           // ffmpeg is gone (EPIPE)
         }
         p += w; n -= w;
     }
@@ -181,14 +181,14 @@ static void *rec_writer(void *arg)
     }
     rec_on = 0;
     pthread_mutex_unlock(&rec_lock);
-    close(rec_fd);                              // ffmpeg sieht Dateiende und schliesst die MKV sauber ab
+    close(rec_fd);                              // ffmpeg sees end of file and finishes the MKV cleanly
     rec_fd = -1;
     return NULL;
 }
 
-int tapr_rec_start(int fd)
+int core_rec_start(int fd)
 {
-    signal(SIGPIPE, SIG_IGN);                   // abgestuerztes ffmpeg = Schreibfehler statt App-Ende
+    signal(SIGPIPE, SIG_IGN);                   // crashed ffmpeg = write error instead of the app quitting
     if (rec_started) return -1;
     pthread_mutex_lock(&rec_lock);
     rec_fd = fd;
@@ -206,11 +206,11 @@ int tapr_rec_start(int fd)
     return 0;
 }
 
-void tapr_rec_stop(void)
+void core_rec_stop(void)
 {
     if (!rec_started) return;
     pthread_mutex_lock(&rec_lock);
-    rec_on = 0;                                 // keine neuen Bilder mehr, der Rest im Puffer geht noch raus
+    rec_on = 0;                                 // no new frames, what's left in the buffer still goes out
     rec_stopping = 1;
     pthread_cond_signal(&rec_wake);
     pthread_mutex_unlock(&rec_lock);
@@ -218,35 +218,35 @@ void tapr_rec_stop(void)
     rec_started = 0;
 }
 
-void tapr_rec_swap(int swap) { rec_swap = swap != 0; }
-int  tapr_rec_active(void) { return rec_on; }
-long tapr_rec_frames(void) { return rec_out; }
-long tapr_rec_lost(void) { return rec_lost; }
+void core_rec_swap(int swap) { rec_swap = swap != 0; }
+int  core_rec_active(void) { return rec_on; }
+long core_rec_frames(void) { return rec_out; }
+long core_rec_lost(void) { return rec_lost; }
 
-// ------------------------------------------------------------ Halbbilder --
+// ------------------------------------------------------------------ Fields --
 
-// Je ein Puffer fuers obere und untere Halbbild. Fehlt mal ein Paket, bleiben die
-// alten Zeilen stehen – wie in ezcap.c.
-static uint8_t field[2][TAPR_FIELD_BYTES];     // [0] oben, [1] unten
+// One buffer each for the top and bottom field. If a packet goes missing, the
+// old lines stay – as in ezcap.c.
+static uint8_t field[2][CORE_FIELD_BYTES];     // [0] top, [1] bottom
 static long pos;
 static int in_field, cur_top, field_closed;
 
-// Die letzten fertigen Halbbilder fuer die Anzeige. USB liefert in 8-ms-Happen, da kommen
-// zwei Halbbilder manchmal fast gleichzeitig an. Die Anzeige holt sie trotzdem der Reihe
-// nach ab, eins pro Bildschirm-Takt, statt das erste zu ueberspringen.
+// The last finished fields for the display. USB delivers in 8 ms chunks, so two fields
+// sometimes arrive almost at once. The display still picks them up in order, one per
+// screen refresh, instead of skipping the first.
 #define RING 4
-static uint8_t ring[RING][TAPR_FIELD_BYTES];
+static uint8_t ring[RING][CORE_FIELD_BYTES];
 static int ring_top[RING];
-static long latest_seq;                         // Nummer des neuesten Halbbilds, 0 = noch keins
+static long latest_seq;                         // number of the newest field, 0 = none yet
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 
-static volatile int play_on;                    // Wiedergabe laeuft: Live-Bild nicht anzeigen
+static volatile int play_on;                    // playback running: don't show the live picture
 
 static void ring_put(const uint8_t *f, int top)
 {
     pthread_mutex_lock(&lock);
     long seq = latest_seq + 1;
-    memcpy(ring[seq % RING], f, TAPR_FIELD_BYTES);
+    memcpy(ring[seq % RING], f, CORE_FIELD_BYTES);
     ring_top[seq % RING] = top;
     latest_seq = seq;
     pthread_mutex_unlock(&lock);
@@ -260,7 +260,7 @@ static void publish(const uint8_t *f, int top)
     rec_feed(f, top);
 }
 
-// ------------------------------------------------------------- Wiedergabe --
+// ---------------------------------------------------------------- Playback --
 
 static pthread_t play_thread;
 static int play_fd = -1, play_started;
@@ -276,22 +276,22 @@ static int play_read_all(uint8_t *p, size_t n)
     return 1;
 }
 
-// Oberes Halbbild zuerst, so wie die Datei gespeichert ist. Feste 20-ms-Schritte wie beim Testbild.
+// Top field first, the way the file is stored. Fixed 20 ms steps like the test frame.
 static void *play_reader(void *arg)
 {
     (void)arg;
-    static uint8_t frame[REC_BYTES], f[2][TAPR_FIELD_BYTES];
+    static uint8_t frame[REC_BYTES], f[2][CORE_FIELD_BYTES];
     double next = now();
     while (play_on && play_read_all(frame, REC_BYTES)) {
-        for (int line = 0; line < TAPR_FIELD_LINES; line++)
+        for (int line = 0; line < CORE_FIELD_LINES; line++)
             for (int t = 0; t < 2; t++)
-                memcpy(f[t] + line * TAPR_LINE_BYTES, frame + (line * 2 + t) * TAPR_LINE_BYTES, TAPR_LINE_BYTES);
+                memcpy(f[t] + line * CORE_LINE_BYTES, frame + (line * 2 + t) * CORE_LINE_BYTES, CORE_LINE_BYTES);
         for (int t = 0; t < 2 && play_on; t++) {
             ring_put(f[t], t == 0);
             next += 0.02;
             double wait = next - now();
             if (wait > 0) usleep((useconds_t)(wait * 1e6));
-            else if (wait < -0.2) next = now();     // nach einem Haenger nicht hinterherrasen
+            else if (wait < -0.2) next = now();     // don't race to catch up after a stall
         }
     }
     play_on = 0;
@@ -300,7 +300,7 @@ static void *play_reader(void *arg)
     return NULL;
 }
 
-int tapr_play_start(int fd)
+int core_play_start(int fd)
 {
     if (play_started) return -1;
     play_fd = fd;
@@ -313,7 +313,7 @@ int tapr_play_start(int fd)
     return 0;
 }
 
-void tapr_play_stop(void)
+void core_play_stop(void)
 {
     if (!play_started) return;
     play_on = 0;
@@ -321,16 +321,16 @@ void tapr_play_stop(void)
     play_started = 0;
 }
 
-int tapr_play_active(void) { return play_on; }
+int core_play_active(void) { return play_on; }
 
-long tapr_field(long seen, uint8_t *dst, int *top)
+long core_field(long seen, uint8_t *dst, int *top)
 {
     pthread_mutex_lock(&lock);
     long want = seen + 1;
-    if (latest_seq - want >= 2) want = latest_seq;  // Anzeige haengt hinterher: aufholen, Verzoegerung klein halten
-    if (want > latest_seq) want = seen;             // nichts Neues
+    if (latest_seq - want >= 2) want = latest_seq;  // display is behind: catch up, keep the delay small
+    if (want > latest_seq) want = seen;             // nothing new
     else {
-        memcpy(dst, ring[want % RING], TAPR_FIELD_BYTES);
+        memcpy(dst, ring[want % RING], CORE_FIELD_BYTES);
         *top = ring_top[want % RING];
     }
     pthread_mutex_unlock(&lock);
@@ -344,8 +344,8 @@ static void field_end(void)
     publish(field[!cur_top], cur_top);
 }
 
-// Kopf: 22 5a xx 88 = neues Halbbild (Bit 0 von xx: 0 = oben), 88 88 88 88 = weiter,
-// Ende-Marker c6 93 93 93. Siehe streamtest.c.
+// Header: 22 5a xx 88 = new field (bit 0 of xx: 0 = top), 88 88 88 88 = continuation,
+// end marker c6 93 93 93. See streamtest.c.
 static void on_packet(const uint8_t *p, int len)
 {
     if (len >= 4 && p[0] == 0x22 && p[1] == 0x5a) {
@@ -367,11 +367,11 @@ static void on_packet(const uint8_t *p, int len)
     if (pos >= EZ_FIELD_BYTES) field_end();
 }
 
-// ---------------------------------------------------------------- Testbild --
+// -------------------------------------------------------------- Test frame --
 
-// Entwickeln ohne Rekorder: TAPR_TESTBILD=frame.yuyv spielt ein gespeichertes Vollbild
-// (720x576 YUYV, z. B. von streamtest) als Halbbild-Strom mit 50/s ab.
-static int testbild(const char *path)
+// Developing without a VCR: EASYCAP_TESTFRAME=frame.yuyv plays a saved frame
+// (720x576 YUYV, e.g. from streamtest) as a stream of fields at 50/s.
+static int test_frame(const char *path)
 {
     static uint8_t frame[EZ_LINE_BYTES * EZ_HEIGHT];
     FILE *f = fopen(path, "rb");
@@ -383,15 +383,15 @@ static int testbild(const char *path)
     for (int line = 0; line < EZ_HEIGHT / 2; line++)
         for (int t = 0; t < 2; t++)
             memcpy(field[t] + line * EZ_LINE_BYTES, frame + (line * 2 + t) * EZ_LINE_BYTES, EZ_LINE_BYTES);
-    // Feste 20-ms-Schritte ab Start, sonst summiert sich das Ueberschlafen von usleep
+    // Fixed 20 ms steps from the start, otherwise usleep's oversleeping adds up
     double next = now();
-    messen_start();
-    regs_load(0);                                   // Regler sind bedienbar, wirken aber auf nichts
+    stats_reset();
+    regs_load(0);                                   // controls can be used but act on nothing
     signal_ok = 1;
-    state = TAPR_LAEUFT;
+    state = CORE_RUNNING;
     for (int top = 1; running; top = !top) {
         publish(field[!top], top);
-        messen();
+        stats_update();
         next += 0.02;
         double wait = next - now();
         if (wait > 0) usleep((useconds_t)(wait * 1e6));
@@ -399,23 +399,23 @@ static int testbild(const char *path)
     return 0;
 }
 
-// ------------------------------------------------------------- USB-Thread --
+// -------------------------------------------------------------- USB thread --
 
-static int stick_da(void)
+static int stick_present(void)
 {
     libusb_context *c;
     libusb_device **list;
-    int da = 0;
+    int present = 0;
     if (libusb_init_context(&c, NULL, 0) < 0) return 0;
     ssize_t n = libusb_get_device_list(c, &list);
     for (ssize_t i = 0; i < n; i++) {
         struct libusb_device_descriptor d;
         if (libusb_get_device_descriptor(list[i], &d) == 0 &&
-            d.idVendor == EZ_VID && d.idProduct == EZ_PID) da = 1;
+            d.idVendor == EZ_VID && d.idProduct == EZ_PID) present = 1;
     }
     if (n >= 0) libusb_free_device_list(list, 1);
     libusb_exit(c);
-    return da;
+    return present;
 }
 
 static void pause_ms(int ms)
@@ -423,37 +423,37 @@ static void pause_ms(int ms)
     for (; running && ms > 0; ms -= 100) usleep(100000);
 }
 
-// Sucht den Stick, bis er da und frei ist, und empfaengt dann bis tapr_stop().
+// Looks for the stick until it's there and free, then receives until core_stop().
 static void *usb_thread(void *arg)
 {
     (void)arg;
-    const char *tb = getenv("TAPR_TESTBILD");
-    if (tb && testbild(tb) == 0) return NULL;
+    const char *tf = getenv("EASYCAP_TESTFRAME");
+    if (tf && test_frame(tf) == 0) return NULL;
 
     while (running) {
-        if (!stick_da()) {
-            state = TAPR_FEHLT;
+        if (!stick_present()) {
+            state = CORE_MISSING;
             pause_ms(1000);
             continue;
         }
         in_field = 0;
         if (ez_open(0) < 0 || ez_stream_start(7, on_packet) < 0) {
             ez_close();
-            state = TAPR_BELEGT;
+            state = CORE_BUSY;
             pause_ms(1000);
             continue;
         }
-        messen_start();
+        stats_reset();
         regs_load(1);
-        state = TAPR_LAEUFT;
+        state = CORE_RUNNING;
         for (double t_signal = 0; running; ) {
             ez_stream_poll(50);
             regs_write();
-            if (now() - t_signal >= 0.5) {         // I2C nur hier im USB-Thread, nie von der Oberflaeche
+            if (now() - t_signal >= 0.5) {         // I2C only here on the USB thread, never from the interface
                 signal_ok = ez_signal_locked();
                 t_signal = now();
             }
-            messen();
+            stats_update();
         }
         regs_ok = 0;
         ez_stream_stop();
@@ -463,18 +463,18 @@ static void *usb_thread(void *arg)
     return NULL;
 }
 
-void tapr_start(void)
+void core_start(void)
 {
     if (running) return;
     running = 1;
     pthread_create(&thread, NULL, usb_thread, NULL);
 }
 
-void tapr_stop(void)
+void core_stop(void)
 {
     if (!running) return;
     running = 0;
     pthread_join(thread, NULL);
 }
 
-int tapr_state(void) { return state; }
+int core_state(void) { return state; }

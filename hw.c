@@ -1,6 +1,6 @@
-// hw.c – Register, I2C, Decoder-Init und isochroner Empfang.
-// Nachgebaut aus Linux em28xx + saa7115.
-// Meldungen gehen nach stderr, weil stdout bei ezcap fuer das Video reserviert ist.
+// hw.c – registers, I2C, decoder init and isochronous reception.
+// Rebuilt from Linux em28xx + saa7115.
+// Messages go to stderr, because ezcap reserves stdout for the video.
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,9 +8,9 @@
 #include <unistd.h>
 #include "hw.h"
 
-#define SAA 0x4a                    // I2C-Adresse des Decoders (8 Bit)
-#define NUM_XFERS 16                // so viele Transfers gleichzeitig "in der Luft"
-#define PKTS_PER_XFER 64            // 64 Microframes = 8 ms pro Transfer
+#define SAA 0x4a                    // I2C address of the decoder (8 bit)
+#define NUM_XFERS 16                // this many transfers "in flight" at once
+#define PKTS_PER_XFER 64            // 64 microframes = 8 ms per transfer
 
 static libusb_context *ctx;
 static libusb_device_handle *h;
@@ -20,7 +20,7 @@ static volatile int streaming;
 static int inflight;
 struct ez_stats ez_stats;
 
-// ---------------------------------------------------------------- Register --
+// --------------------------------------------------------------- Registers --
 
 static int reg_write(uint8_t reg, uint8_t val)
 {
@@ -34,19 +34,19 @@ int ez_reg_read(uint8_t reg)
     return r == 1 ? v : -1;
 }
 
-// Nach jedem I2C-Zugriff meldet Register 0x05, ob der Empfaenger "ACK" gesagt hat.
+// After every I2C access, register 0x05 reports whether the receiver said "ACK".
 static int i2c_wait(void)
 {
     for (int i = 0; i < 20; i++) {
         int st = ez_reg_read(0x05);
         if (st == 0) return 0;
-        if (st == 0x10) return -1;          // niemand hat geantwortet
+        if (st == 0x10) return -1;          // nobody answered
         usleep(5000);
     }
     return -1;
 }
 
-// req 2 = I2C mit Stop am Ende, req 3 = ohne Stop (danach folgt ein Lesen)
+// req 2 = I2C with a stop at the end, req 3 = without stop (a read follows)
 static int i2c_send(uint8_t addr, uint8_t *buf, int len, int stop)
 {
     if (libusb_control_transfer(h, 0x40, stop ? 2 : 3, 0, addr, buf, len, 1000) != len)
@@ -68,8 +68,8 @@ int ez_saa_read(uint8_t reg)
     return i2c_wait() == 0 ? v : -1;
 }
 
-// Status-Byte 0x1f (Datenblatt Tabelle 56): Bit 6 HLVLN = 0 heisst eingerastet,
-// Bit 0 RDCAP = 1 heisst alle Regelschleifen stehen. Interlaced (Bit 7) ist egal.
+// Status byte 0x1f (datasheet table 56): bit 6 HLVLN = 0 means locked,
+// bit 0 RDCAP = 1 means all control loops have settled. Interlaced (bit 7) doesn't matter.
 int ez_signal_locked(void)
 {
     int s = ez_saa_read(0x1f);
@@ -78,7 +78,7 @@ int ez_signal_locked(void)
 
 // ----------------------------------------------------------------- Decoder --
 
-// Aus Linux saa7115.c. Erst Grundwerte, dann die 50-Hz-(PAL)-Werte.
+// From Linux saa7115.c. Base values first, then the 50 Hz (PAL) values.
 static const uint8_t saa7113_init[] = {
     0x01, 0x08, 0x02, 0xc2, 0x03, 0x30, 0x04, 0x00, 0x05, 0x00, 0x06, 0x89,
     0x07, 0x0d, 0x08, 0x88, 0x09, 0x01, 0x0a, 0x80, 0x0b, 0x47, 0x0c, 0x40,
@@ -91,7 +91,7 @@ static const uint8_t gm7113c_init[] = {
     0x0d, 0x00, 0x0e, 0x01, 0x0f, 0x2a, 0x10, 0x00, 0x11, 0x0c, 0x12, 0x01,
     0x13, 0x00, 0x15, 0x00, 0x16, 0x00, 0x17, 0x00,
 };
-// Teil von saa7115_cfg_50hz_video, den der SAA7113 wirklich hat
+// The part of saa7115_cfg_50hz_video the SAA7113 actually has
 static const uint8_t saa7113_pal[] = {
     0x15, 0x37, 0x16, 0x16, 0x17, 0x99, 0x08, 0x28, 0x0e, 0x07, 0x5a, 0x03,
 };
@@ -100,14 +100,14 @@ static int write_table(const uint8_t *t, int n)
 {
     for (int i = 0; i < n; i += 2)
         if (ez_saa_write(t[i], t[i + 1]) < 0) {
-            fprintf(stderr, "I2C-Schreiben auf Decoder-Register 0x%02x fehlgeschlagen\n", t[i]);
+            fprintf(stderr, "I2C write to decoder register 0x%02x failed\n", t[i]);
             return -1;
         }
     return 0;
 }
 
-// Linux-Trick: Register 0 sechzehnmal mit Index beschreiben und zuruecklesen.
-// Echter Philips-Chip liefert "?f7113...", der GM7113C-Klon nur Nullen.
+// Linux trick: write register 0 sixteen times with an index and read it back.
+// A real Philips chip returns "?f7113...", the GM7113C clone only zeros.
 static int decoder_is_gm7113c(void)
 {
     char name[17];
@@ -118,10 +118,10 @@ static int decoder_is_gm7113c(void)
         name[i] = c < 10 ? '0' + c : 'a' + c - 10;
     }
     name[16] = 0;
-    fprintf(stderr, "Decoder-Kennung: %s -> ", name);
-    if (!memcmp(name + 1, "f7113", 5)) { fprintf(stderr, "echter SAA7113\n"); return 0; }
-    if (!memcmp(name, "0000", 4))       { fprintf(stderr, "GM7113C (Klon)\n"); return 1; }
-    fprintf(stderr, "unbekannt, nehme SAA7113-Werte\n");
+    fprintf(stderr, "Decoder ID: %s -> ", name);
+    if (!memcmp(name + 1, "f7113", 5)) { fprintf(stderr, "real SAA7113\n"); return 0; }
+    if (!memcmp(name, "0000", 4))       { fprintf(stderr, "GM7113C (clone)\n"); return 1; }
+    fprintf(stderr, "unknown, using SAA7113 values\n");
     return 0;
 }
 
@@ -130,12 +130,12 @@ static int decoder_init(int svideo)
     int gm = decoder_is_gm7113c();
     if (gm) {
         if (write_table(gm7113c_init, sizeof gm7113c_init) < 0) return -1;
-        ez_saa_write(0x08, ez_saa_read(0x08) & ~0xc0);     // PAL fest, keine Auto-Erkennung
+        ez_saa_write(0x08, ez_saa_read(0x08) & ~0xc0);     // PAL fixed, no auto-detection
     } else {
         if (write_table(saa7113_init, sizeof saa7113_init) < 0) return -1;
         if (write_table(saa7113_pal, sizeof saa7113_pal) < 0) return -1;
     }
-    // Eingang: Composite (Mode 0) oder S-Video (Mode 9)
+    // Input: composite (mode 0) or S-Video (mode 9)
     ez_saa_write(0x02, (ez_saa_read(0x02) & 0xf0) | (svideo ? 9 : 0));
     ez_saa_write(0x09, (ez_saa_read(0x09) & 0x7f) | (svideo ? 0x80 : 0));
     return 0;
@@ -145,32 +145,32 @@ static int decoder_init(int svideo)
 
 static void bridge_init(void)
 {
-    reg_write(0x0f, 0x27);      // XCLK: 12 MHz (Linux-Standard)
-    reg_write(0x06, 0x40);      // I2C: 100 kHz + Clock-Stretching
+    reg_write(0x0f, 0x27);      // XCLK: 12 MHz (Linux default)
+    reg_write(0x06, 0x40);      // I2C: 100 kHz + clock stretching
     usleep(50000);
 }
 
 static void bridge_video_setup(void)
 {
-    reg_write(0x27, 0x34);      // Ausgabeformat YUYV (0x14) + Bit 5 wie Windows-Treiber
-    reg_write(0x10, 0x10);      // Eingang vom Decoder: CbYCrY (= UYVY)
-    reg_write(0x11, 0x11);      // interlaced + CCIR656 (Sync steckt im Datenstrom)
+    reg_write(0x27, 0x34);      // output format YUYV (0x14) + bit 5 like the Windows driver
+    reg_write(0x10, 0x10);      // input from the decoder: CbYCrY (= UYVY)
+    reg_write(0x11, 0x11);      // interlaced + CCIR656 (sync is embedded in the data stream)
 
-    // Farbregler neutral, Schaerfe AUS (wir wollen den Look nicht "verbessern")
+    // Color controls neutral, sharpness OFF (we don't want to "improve" the look)
     reg_write(0x20, 0x10); reg_write(0x21, 0x00); reg_write(0x22, 0x10);
     reg_write(0x23, 0x00); reg_write(0x24, 0x00); reg_write(0x25, 0x00);
     reg_write(0x14, 0x20); reg_write(0x15, 0x20); reg_write(0x16, 0x20);
     reg_write(0x17, 0x20); reg_write(0x18, 0x00); reg_write(0x19, 0x00);
     reg_write(0x1a, 0x00);
 
-    // "Accumulator" + Aufnahmefenster: volle 720x576, ab Pixel 0 / Zeile 0
+    // "Accumulator" + capture window: full 720x576, from pixel 0 / line 0
     reg_write(0x28, 1); reg_write(0x29, (EZ_WIDTH - 4) >> 2);
     reg_write(0x2a, 1); reg_write(0x2b, (EZ_HEIGHT - 4) >> 2);
     reg_write(0x1c, 0); reg_write(0x1d, 0);
     reg_write(0x1e, EZ_WIDTH >> 2); reg_write(0x1f, EZ_HEIGHT >> 2);
     reg_write(0x1b, ((EZ_HEIGHT >> 9) & 2) | ((EZ_WIDTH >> 10) & 1));
 
-    // Skalierer aus
+    // Scaler off
     reg_write(0x30, 0); reg_write(0x31, 0); reg_write(0x32, 0); reg_write(0x33, 0);
     reg_write(0x26, 0x00);
 }
@@ -181,30 +181,30 @@ static void capture(int on)
     reg_write(0x0c, on ? (r | 0x10) : (r & ~0x10));
     if (on) {
         reg_write(0x48, 0x00);
-        reg_write(0x12, 0x67);  // Video-Eingang an
+        reg_write(0x12, 0x67);  // video input on
         usleep(10000);
     } else {
-        reg_write(0x12, 0x27);  // Video-Eingang aus
+        reg_write(0x12, 0x27);  // video input off
     }
 }
 
-// --------------------------------------------------------- Oeffnen/Schliessen --
+// ------------------------------------------------------------ Open/close --
 
 int ez_open(int svideo)
 {
     if (libusb_init_context(&ctx, NULL, 0) < 0) return -1;
     h = libusb_open_device_with_vid_pid(ctx, EZ_VID, EZ_PID);
     if (!h) {
-        fprintf(stderr, "Geraet %04x:%04x nicht gefunden / nicht oeffenbar\n", EZ_VID, EZ_PID);
+        fprintf(stderr, "Device %04x:%04x not found / can't be opened\n", EZ_VID, EZ_PID);
         return -1;
     }
     int r = libusb_claim_interface(h, 0);
     if (r < 0) {
-        fprintf(stderr, "Interface 0 uebernehmen: %s\n", libusb_error_name(r));
+        fprintf(stderr, "Claiming interface 0: %s\n", libusb_error_name(r));
         return -1;
     }
     if (ez_reg_read(0x0a) != 34)
-        fprintf(stderr, "Warnung: Chip-ID ist nicht 34 (EM2860)\n");
+        fprintf(stderr, "Warning: chip ID is not 34 (EM2860)\n");
 
     bridge_init();
     if (decoder_init(svideo) < 0) return -1;
@@ -223,7 +223,7 @@ void ez_close(void)
     ctx = NULL;
 }
 
-// ------------------------------------------------------------ Datenempfang --
+// --------------------------------------------------------------- Receiving --
 
 static void LIBUSB_CALL xfer_cb(struct libusb_transfer *x)
 {
@@ -237,7 +237,7 @@ static void LIBUSB_CALL xfer_cb(struct libusb_transfer *x)
             on_packet(libusb_get_iso_packet_buffer_simple(x, i), d->actual_length);
         }
     } else if (x->status != LIBUSB_TRANSFER_CANCELLED) {
-        fprintf(stderr, "Transfer-Status %d\n", x->status);
+        fprintf(stderr, "Transfer status %d\n", x->status);
     }
     if (streaming && libusb_submit_transfer(x) == 0) return;
     inflight--;
@@ -247,12 +247,12 @@ int ez_stream_start(int alt, ez_packet_fn fn)
 {
     int r = libusb_set_interface_alt_setting(h, 0, alt);
     if (r < 0) {
-        fprintf(stderr, "Alt-Setting %d: %s\n", alt, libusb_error_name(r));
+        fprintf(stderr, "Alt setting %d: %s\n", alt, libusb_error_name(r));
         return -1;
     }
     int pkt = libusb_get_max_alt_packet_size(libusb_get_device(h), 0, alt, EZ_EP_VIDEO);
     if (pkt <= 0) {
-        fprintf(stderr, "Alt-Setting %d hat keine Bandbreite fuer Video\n", alt);
+        fprintf(stderr, "Alt setting %d has no bandwidth for video\n", alt);
         return -1;
     }
 

@@ -1,9 +1,9 @@
-// dump_desc.c – liest den kompletten USB-Konfigurationsdeskriptor des Grabbers
-// und zeigt alle Interfaces, Alternate Settings und Endpoints an.
-// Nur lesen, nichts schreiben: macOS hat den Deskriptor beim Einstecken schon
-// abgefragt und gecacht, wir lesen nur diese Kopie.
+// dump_desc.c – reads the grabber's complete USB configuration descriptor
+// and shows all interfaces, alternate settings and endpoints.
+// Read only, nothing is written: macOS already fetched and cached the descriptor
+// when the stick was plugged in, we only read that copy.
 //
-// Bauen: make dump_desc
+// Build: make dump_desc
 
 #include <stdio.h>
 #include <CoreFoundation/CoreFoundation.h>
@@ -24,28 +24,28 @@ static void dump(const uint8_t *p, int total)
         if (len < 2 || off + len > total) break;
         const uint8_t *d = p + off;
 
-        if (type == 2) {            // Konfiguration
-            printf("Konfiguration %d: %d Interfaces, Gesamtlaenge %d Bytes, max %d mA\n",
+        if (type == 2) {            // configuration
+            printf("Configuration %d: %d interfaces, total length %d bytes, max %d mA\n",
                    d[5], d[4], d[2] | d[3] << 8, d[8] * 2);
-        } else if (type == 4) {     // Interface
-            printf("\n  Interface %d, Alt %d: Klasse 0x%02x/0x%02x/0x%02x, %d Endpoints\n",
+        } else if (type == 4) {     // interface
+            printf("\n  Interface %d, alt %d: class 0x%02x/0x%02x/0x%02x, %d endpoints\n",
                    d[2], d[3], d[5], d[6], d[7], d[4]);
-        } else if (type == 5) {     // Endpoint
+        } else if (type == 5) {     // endpoint
             int addr = d[2], attr = d[3];
             int mps = d[4] | d[5] << 8;
             int size = mps & 0x7ff;
-            int mult = ((mps >> 11) & 3) + 1;   // Pakete pro Microframe (High-Bandwidth)
+            int mult = ((mps >> 11) & 3) + 1;   // packets per microframe (high bandwidth)
             int interval = d[6];
-            printf("    EP 0x%02x %-3s %-9s  %4d Bytes x %d", addr, (addr & 0x80) ? "IN" : "OUT",
+            printf("    EP 0x%02x %-3s %-9s  %4d bytes x %d", addr, (addr & 0x80) ? "IN" : "OUT",
                    xfer_type[attr & 3], size, mult);
             if ((attr & 3) == 1) {
-                // High-Speed: 8000 Microframes/s, bInterval = 2^(n-1) Microframes
+                // High speed: 8000 microframes/s, bInterval = 2^(n-1) microframes
                 double per_s = 8000.0 / (1 << (interval - 1));
                 printf("  -> %.1f MB/s", size * mult * per_s / 1e6);
             }
             printf("  (bInterval %d)\n", interval);
-        } else {                    // Klassen-spezifisch (z. B. Audio), nur roh zeigen
-            printf("      [Typ 0x%02x, %d Bytes]", type, len);
+        } else {                    // class-specific (e.g. audio), only shown raw
+            printf("      [type 0x%02x, %d bytes]", type, len);
             for (int i = 2; i < len; i++) printf(" %02x", d[i]);
             printf("\n");
         }
@@ -63,22 +63,22 @@ int main(void)
     CFDictionarySetValue(match, CFSTR("idProduct"), p);
 
     io_service_t svc = IOServiceGetMatchingService(kIOMainPortDefault, match);
-    if (!svc) { fprintf(stderr, "Geraet %04x:%04x nicht gefunden\n", VID, PID); return 1; }
+    if (!svc) { fprintf(stderr, "Device %04x:%04x not found\n", VID, PID); return 1; }
 
     IOCFPlugInInterface **plug = NULL;
     SInt32 score;
     if (IOCreatePlugInInterfaceForService(svc, kIOUSBDeviceUserClientTypeID,
                                           kIOCFPlugInInterfaceID, &plug, &score) != kIOReturnSuccess) {
-        fprintf(stderr, "PlugIn fehlgeschlagen\n"); return 1;
+        fprintf(stderr, "Plug-in failed\n"); return 1;
     }
     IOUSBDeviceInterface **dev = NULL;
     (*plug)->QueryInterface(plug, CFUUIDGetUUIDBytes(kIOUSBDeviceInterfaceID), (LPVOID *)&dev);
     (*plug)->Release(plug);
-    if (!dev) { fprintf(stderr, "DeviceInterface fehlgeschlagen\n"); return 1; }
+    if (!dev) { fprintf(stderr, "Device interface failed\n"); return 1; }
 
     IOUSBConfigurationDescriptorPtr cfg;
     if ((*dev)->GetConfigurationDescriptorPtr(dev, 0, &cfg) != kIOReturnSuccess) {
-        fprintf(stderr, "Konfigurationsdeskriptor nicht lesbar\n"); return 1;
+        fprintf(stderr, "Configuration descriptor not readable\n"); return 1;
     }
     dump((const uint8_t *)cfg, USBToHostWord(cfg->wTotalLength));
 
